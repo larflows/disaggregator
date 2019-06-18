@@ -25,30 +25,60 @@ library(dplyr)
 library(tidyr)
 library(lubridate)
 
+# Default paths.
 # This assumes LARFlows is in the working directory.
-dailyData <- as_tibble(read_csv(file.path("LARFlows", "Disaggregate Flows", "F277_87-05_daily.csv"), col_names = TRUE, skip=1))
+dataPath <- file.path("LARFlows", "Disaggregate Flows", "F277_87-05_daily.csv")
 outPath <- file.path("LARFlows", "Disaggregate Flows", "F277_87-18_hourly.csv")
 
-# Some of the rows are originally NA for Mean flows.  This replaces the NA values with 0.
-# dailyData <- dailyDataWithNA %>% rowwise() %>% mutate(Mean = (function(m) {
-#  if (is.na(m)) 0 else m
-# })(Mean))
+runCmd <- function() {
+  # Run from command line
+  # Not fully tested yet.
+  args <- commandArgs(TRUE)
+  if (length(args) == 0) { # Default: run test
+    print(paste("Test percent error with 10,000 trials of random data:", randomTrials(), sep=" "), quote=FALSE)
+    print.factor("Refer to README.md for usage information.")
+  } else {
+    if (args[1] != "--in") { # No input file specified
+      if (args[1] != "--test") { # Test not specified either
+        print.factor("Error: first argument must be either --in <file path> or --test.  Refer to README.md for usage information.")
+      } else print(paste("Test percent error with 10,000 trials of random data:", randomTrials(), sep=" "), quote=FALSE)
+    } else { # Input file specified
+      if (length(args) == 3 && args[3] == "--test") { # 3: --in <path> --test
+        daily <- getDailyData(args[2])
+        maxErr <- compareData(daily, prepareData(daily)) %>% ungroup() %>% summarize(max(abs(pctDiff))) # Returning NA currently
+        print(paste("Percent error with provided data:", maxErr, sep=" "), quote=FALSE)
+      } else if (length(args) >= 4 && args[3] == "--out") { # 4: --in <path> --out <path>, maybe --append <T|F>
+          daily <- getDailyData(args[2])
+          out <- args[4]
+          append <- if (length(args) == 6 && args[5] == "--append") { args[6] == "T" } else TRUE
+          output(prepareData(daily), out, append)
+        }
+    }
+  }
+}
 
-findMid <- function(start, end, mean) {
+# Read the data in appropriate format.
+getDailyData <- function(path = dataPath, skip = 1) {
+  # Skip: number of rows before column headers
+  as_tibble(read_csv(path, col_names = TRUE, skip = skip))
+}
+
+findMid <- function(start, end, mean, steps = 24, midpoint = 13) {
   # Determine what the midpoint value needs to be to achieve the desired mean,
   # given the start and end values.  Since the first half of the day is 13 hours and the
   # second only 11 (13:00-23:00), the second half is weighted less.
-  # mean = ((start + mid) / 2 * 13 + (end + mid) / 2 * 11) / 24 = (start * 13/2 + end * 11/2 + mid * 12) / 24
-  # Thus mid = (1/12) * (24 * mean - (start * 13/2 + end * 11/2))
-  (1/12) * (24 * mean - (start * 13/2 + end * 11/2))
+  # mean = ((start + mid) / 2 * midpoint + (end + mid) / 2 * (steps - midpoint)) / steps = (start * midpoint/2 + end * (steps-midpoint)/2 + mid * 12) / steps
+  # Thus mid = (2/steps) * (steps * mean - (start * midpoint/2 + end * (steps-midpoint)/2))
+  # Steps is the number of blocks (e.g. hours); midpoint is which block is in the middle (noon is the 13th)
+  (2/steps) * (steps * mean - (start * midpoint/2 + end * (steps-midpoint)/2))
 }
 
-makeBounds <- function(yesterday, today, tomorrow) {
+makeBounds <- function(prev, current, nxt) {
   # Given the mean flows for the three days, determine today's flows
   # at midnight (start), noon (mid), and the next midnight (end).
-  start <- if (yesterday > today) today else yesterday
-  end <- if (tomorrow > today) today else tomorrow
-  mid <- findMid(start, end, today)
+  start <- if (prev > current) current else prev
+  end <- if (nxt > current) current else nxt
+  mid <- findMid(start, end, current)
   c(
     start = start,
     mid = mid,
@@ -56,14 +86,14 @@ makeBounds <- function(yesterday, today, tomorrow) {
   )
 }
 
-makeRange <- function(start, mid, end) {
+makeRange <- function(start, mid, end, steps=24, midpoint=13) {
   # Given the values at midnight, noon, and the next midnight, make the
   # range of hourly values.  To avoid duplication, the next midnight is omitted.
   startMid <- mid - start
   midEnd <- end - mid
-  startHours <- (0:12)/12 * startMid + start
-  endHours <- (1:11)/12 * midEnd + mid
-  c(startHours, endHours)
+  startSteps <- (0:(steps/2))/(steps/2) * startMid + start
+  endSteps <- (1:(steps/2 - 1))/(steps/2) * midEnd + mid
+  c(startSteps, endSteps)
 }
 
 dailyToHourly <- function(yesterday, today, tomorrow) {
@@ -79,15 +109,15 @@ dailyToHourly <- function(yesterday, today, tomorrow) {
   }
 }
 
-withYesterdayTomorrow <- function(daily) {
+withPrevNext <- function(daily) {
   # Apparently it got grouped somewhere, which messes up lag and lead.  The ungroup() fixes it.
-  daily %>% ungroup() %>% mutate(yesterday = lag(Mean), tomorrow=lead(Mean))
+  daily %>% ungroup() %>% mutate(yesterday = lag("Mean"), tomorrow=lead("Mean"))
 }
 
-withHours <- function(dailyYT) {
+withHours <- function(originalPN) {
   # Adds a column for each hour with the appropriate data, then converts those columns into a "Time" column
   # and a "Flow" column, before removing the yesterday and tomorrow columns.
-  dailyYT %>% 
+  originalPN %>% 
     rowwise() %>%
     mutate(`0:00:00` = dailyToHourly(yesterday, Mean, tomorrow)[1],
          `1:00:00` = dailyToHourly(yesterday, Mean, tomorrow)[2],
@@ -119,16 +149,16 @@ withHours <- function(dailyYT) {
       arrange(mdy(Date))
 }
 
-prepareData <- function(daily = dailyData) {
+prepareData <- function(daily = getDailyData()) {
   daily %>%
-    withYesterdayTomorrow %>%
+    withPrevNext %>%
     withHours
 }
 
-compareData <- function(daily = dailyData, hourly = prepareData()) {
+compareData <- function(daily = getDailyData(), hourly = prepareData()) {
   # Data to compare means and ensure they are correct
   means <- hourly %>% group_by(Date) %>% summarize(mean(Flow))
-  inner_join(daily, means, by="Date") %>% mutate(pctDiff = (Mean - `mean(Flow)`) / (if (Mean > 0) Mean else 1) * 100)
+  inner_join(daily, means, by="Date") %>% rowwise() %>% mutate(pctDiff = (Mean - `mean(Flow)`) / (if (!is.na(Mean) && Mean > 0) Mean else 1) * 100)
 }
 
 randomTrials <- function(size = 10000) {
@@ -149,3 +179,5 @@ output <- function(data = prepareData(), path=outPath, append=TRUE) {
   # each of those blocks is sorted.
   write_csv(data, path, na="", append=append)
 }
+
+runCmd()

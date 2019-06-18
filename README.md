@@ -1,6 +1,14 @@
 # Disaggregator
 Disaggregates data by inventing data at smaller intervals to maintain the same mean.  The original intent is to disaggregate daily mean flow data into hourly, but minor code modifications or, possibly in the future, changes in configuration options could let it be used for other disaggregation tasks.  It is currently set up with the endpoints at midnight and the midpoint at noon.
 
+## Command Line Options
+Calling with no options is equivalent to calling with --test.  --in <path> is required unless --test is specified.  If --in is specified, then --out <path> is also required unless --test is specified.
+
+--in <path>: Input file path.
+--out <path>: Output file path.
+--append <T|F>: Append to or overwrite output file.  Default is T.
+--test: Test for accuracy (means of hourly data vs. daily means).  If --in is specified, then it tests against the actual data.  If not, then it runs 10,000 trials with random data.
+
 ## Algorithm
 The algorithm produces the disaggregated data in linear chunks so that the mean over an interval is equal to the actual mean.  The point at each end of an interval is set to be the lower of the two means on either side, then the midpoint is set such that the mean over the interval is correct, and the remainder of the data is linearly interpolated between the midpoint and the endpoints.  In testing (from converting daily to hourly), the differences between the actual mean and the mean of the generated data have been on the order of 10^-14 of the actual mean, presumably explained by rounding errors.
 
